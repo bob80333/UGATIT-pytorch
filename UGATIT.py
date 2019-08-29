@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from networks import *
 from utils import *
 from glob import glob
+import gc
 
 class UGATIT(object) :
     def __init__(self, args):
@@ -48,6 +49,15 @@ class UGATIT(object) :
         self.benchmark_flag = args.benchmark_flag
         self.resume = args.resume
 
+        """ FP16 """
+        self.fp16 = args.fp16
+        
+        if self.fp16:
+            try:
+                from apex import amp
+            except ImportError:
+                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16.")
+
         if torch.backends.cudnn.enabled and self.benchmark_flag:
             print('set benchmark !')
             torch.backends.cudnn.benchmark = True
@@ -55,6 +65,7 @@ class UGATIT(object) :
         print()
 
         print("##### Information #####")
+        print("# fp16 : ", self.fp16)
         print("# light : ", self.light)
         print("# dataset : ", self.dataset)
         print("# batch_size : ", self.batch_size)
@@ -126,7 +137,23 @@ class UGATIT(object) :
         """ Define Rho clipper to constraint the value of rho in AdaILN and ILN"""
         self.Rho_clipper = RhoClipper(0, 1)
 
+        """ Initialize FP16 support through AMP """
+        
+        if self.fp16:
+            try:
+                from apex import amp
+            except ImportError:
+                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16.")
+            [self.genA2B, self.genB2A, self.disGA, self.disGB, self.disLA, self.disLB], [self.G_optim, self.D_optim] = amp.initialize([self.genA2B, self.genB2A, self.disGA, self.disGB, self.disLA, self.disLB], [self.G_optim, self.D_optim], num_losses=2, opt_level="O1")
+
     def train(self):
+
+        """ Import amp """
+        if self.fp16:
+            try:
+                from apex import amp
+            except ImportError:
+                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16.")
         self.genA2B.train(), self.genB2A.train(), self.disGA.train(), self.disGB.train(), self.disLA.train(), self.disLB.train()
 
         start_iter = 1
@@ -145,6 +172,13 @@ class UGATIT(object) :
         print('training start !')
         start_time = time.time()
         for step in range(start_iter, self.iteration + 1):
+            # gpu memory seems to be leaking or badly fragmented, can't allocate
+            # 1gb when 4.75gb are cached
+            # hopefully this helps
+            print("Pre cache clear:", torch.cuda.memory_allocated())
+            # helped but still 3.9gb cached...
+            torch.cuda.empty_cache()
+            print("Post cache clear:", torch.cuda.memory_allocated())
             if self.decay_flag and step > (self.iteration // 2):
                 self.G_optim.param_groups[0]['lr'] -= (self.lr / (self.iteration // 2))
                 self.D_optim.param_groups[0]['lr'] -= (self.lr / (self.iteration // 2))
@@ -192,7 +226,9 @@ class UGATIT(object) :
             D_loss_B = self.adv_weight * (D_ad_loss_GB + D_ad_cam_loss_GB + D_ad_loss_LB + D_ad_cam_loss_LB)
 
             Discriminator_loss = D_loss_A + D_loss_B
-            Discriminator_loss.backward()
+            # use amp scaled loss #0 for discriminator
+            with amp.scale_loss(Discriminator_loss, self.D_optim, loss_id=0) as scaled_loss:
+                scaled_loss.backward()
             self.D_optim.step()
 
             # Update G
@@ -234,7 +270,9 @@ class UGATIT(object) :
             G_loss_B = self.adv_weight * (G_ad_loss_GB + G_ad_cam_loss_GB + G_ad_loss_LB + G_ad_cam_loss_LB) + self.cycle_weight * G_recon_loss_B + self.identity_weight * G_identity_loss_B + self.cam_weight * G_cam_loss_B
 
             Generator_loss = G_loss_A + G_loss_B
-            Generator_loss.backward()
+            # use amp scaled loss #1 for generator
+            with amp.scale_loss(Generator_loss, self.G_optim, loss_id=1) as scaled_loss:
+                scaled_loss.backward()
             self.G_optim.step()
 
             # clip parameter of AdaILN and ILN, applied after optimizer step
