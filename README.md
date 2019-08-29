@@ -1,4 +1,4 @@
-## U-GAT-IT &mdash; Official PyTorch Implementation
+## U-GAT-IT &mdash; Fork of Official PyTorch Implementation with FP16
 ### : Unsupervised Generative Attentional Networks with Adaptive Layer-Instance Normalization for Image-to-Image Translation
 
 <div align="center">
@@ -90,3 +90,6 @@ If you find this code useful for your research, please cite our paper:
 
 ## Author
 [Junho Kim](http://bit.ly/jhkim_ai), Minjae Kim, Hyeonwoo Kang, Kwanghee Lee
+
+## Modifications:
+* Used Nvidia apex to add FP16 support
